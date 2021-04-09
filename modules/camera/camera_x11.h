@@ -1,5 +1,5 @@
 /*************************************************************************/
-/*  register_types.cpp                                                   */
+/*  camera_lin.h                                                         */
 /*************************************************************************/
 /*                       This file is part of:                           */
 /*                           GODOT ENGINE                                */
@@ -28,29 +28,35 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                */
 /*************************************************************************/
 
-#include "register_types.h"
+#ifndef CAMERAX11_H
+#define CAMERAX11_H
+#include <vector>
+#include <stdint.h>
 
-#if defined(WINDOWS_ENABLED)
-#include "camera_win.h"
-#endif
-#if defined(OSX_ENABLED)
-#include "camera_osx.h"
-#endif
-#if defined(X11_ENABLED)
-#include "camera_x11.h"
-#endif
+#include "servers/camera_server.h"
+class V4l2_Device;
 
-void register_camera_types() {
-#if defined(WINDOWS_ENABLED)
-	CameraServer::make_default<CameraWindows>();
-#endif
-#if defined(OSX_ENABLED)
-	CameraServer::make_default<CameraOSX>();
-#endif
-#if defined(X11_ENABLED)
-	CameraServer::make_default<CameraX11>();
-#endif
-}
+struct v4l2_funcs {
+    int (*open)(const char *file, int oflag, ...);
+    int (*close)(int fd);
+    int (*dup)(int fd);
+    int (*ioctl)(int fd, unsigned long int request, ...);
+    long int (*read)(int fd, void* buffer, size_t n);
+    void* (*mmap)(void *start, size_t length, int prot, int flags, int fd, int64_t offset);
+    int (*munmap)(void *_start, size_t length);
+	bool libv4l2;
+};
 
-void unregister_camera_types() {
-}
+class CameraX11 : public CameraServer {
+private:
+	struct v4l2_funcs funcs;
+	void* libv4l2;
+public:
+	CameraX11();
+	~CameraX11();
+	std::vector<V4l2_Device*> devices;
+
+	void update_feeds();
+};
+
+#endif /* CAMERAX11_H */
