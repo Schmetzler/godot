@@ -32,9 +32,19 @@
 #define CAMERAX11_H
 #include <vector>
 #include <stdint.h>
+#include <string>
+#include <thread>
+#include <linux/videodev2.h>
 
 #include "servers/camera_server.h"
-class V4l2_Device;
+#include "servers/camera/camera_feed.h"
+
+enum IOType {
+    TYPE_IO_NONE = 0,  // not usable
+    TYPE_IO_MMAP = 1,  // using mmap buffers
+    TYPE_IO_USRPTR = 2, // use other buffers
+    TYPE_IO_READ = 3  // using read call
+};
 
 struct v4l2_funcs {
     int (*open)(const char *file, int oflag, ...);
@@ -45,6 +55,81 @@ struct v4l2_funcs {
     void* (*mmap)(void *start, size_t length, int prot, int flags, int fd, int64_t offset);
     int (*munmap)(void *_start, size_t length);
 	bool libv4l2;
+};
+
+class V4l2_Device {
+    private:
+        // buffers for mmap
+        struct buffer {
+            void   *start;
+            size_t length;
+        } *buffers;
+        unsigned int n_buffers;
+        struct v4l2_buffer buf;
+        struct v4l2_capability cap;
+        struct v4l2_format fmt;
+        // only for read and userp
+        unsigned int buffer_size;
+        
+        // the file descriptor
+        int fd = -1;
+        // the v4l2 functions (either libv4l2 or normal v4l2)
+        struct v4l2_funcs *funcs;
+        // the image data
+        PoolVector<uint8_t> img_data;
+        // whether device is initialized
+        // access type and used pixelformat
+        IOType type = TYPE_IO_NONE;
+
+        // Thread that set image to the feed
+        std::thread stream_thread;
+        // and the function for the thread
+        void stream_image(Ref<CameraFeed> feed);
+        void get_image(Ref<CameraFeed> feed, uint8_t* buffer);
+
+        // ioctl with some signal tolerance
+        int xioctl(unsigned long int request, void *arg);
+        bool buffer_available = false;
+
+    public:
+        bool use_libv4l2;
+        bool opened = false;
+
+        bool streaming = false;
+        std::string dev_name;
+        String name;
+
+        unsigned int width = 0;
+        unsigned int height = 0;
+        static V4l2_Device* create_device(const char *dev_name, struct v4l2_funcs *funcs);
+
+        V4l2_Device(const char *dev_name, struct v4l2_funcs *funcs);
+        ~V4l2_Device();
+
+        bool open();
+        bool close();
+
+        bool request_buffers();
+        void cleanup_buffers();
+
+        bool start_streaming(Ref<CameraFeed> feed);
+        void stop_streaming();
+};
+
+class CameraFeedX11 : public CameraFeed {
+private:
+	V4l2_Device *device;
+
+public:
+	V4l2_Device *get_device() const;
+
+	CameraFeedX11();
+	~CameraFeedX11();
+
+	void set_device(V4l2_Device *p_device);
+
+	bool activate_feed();
+	void deactivate_feed();
 };
 
 class CameraX11 : public CameraServer {
