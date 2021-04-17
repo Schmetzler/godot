@@ -1,5 +1,5 @@
 /*************************************************************************/
-/*  camera_lin.h                                                         */
+/*  camera_x11.h                                                         */
 /*************************************************************************/
 /*                       This file is part of:                           */
 /*                           GODOT ENGINE                                */
@@ -30,6 +30,7 @@
 
 #ifndef CAMERAX11_H
 #define CAMERAX11_H
+
 #include <vector>
 #include <stdint.h>
 #include <string>
@@ -46,6 +47,8 @@ enum IOType {
     TYPE_IO_READ = 3  // using read call
 };
 
+// struct that store the used v4l2 functions
+// either from v4l2 direct or from libv4l2
 struct v4l2_funcs {
     int (*open)(const char *file, int oflag, ...);
     int (*close)(int fd);
@@ -88,7 +91,7 @@ class V4l2_Device {
         void get_image(Ref<CameraFeed> feed, uint8_t* buffer);
 
         // ioctl with some signal tolerance
-        int xioctl(unsigned long int request, void *arg);
+        int xioctl(int fd, unsigned long int request, void *arg);
         bool buffer_available = false;
 
     public:
@@ -101,12 +104,11 @@ class V4l2_Device {
 
         unsigned int width = 0;
         unsigned int height = 0;
-        static V4l2_Device* create_device(const char *dev_name, struct v4l2_funcs *funcs);
 
-        V4l2_Device(const char *dev_name, struct v4l2_funcs *funcs);
+        V4l2_Device(std::string dev_name, struct v4l2_funcs *funcs);
         ~V4l2_Device();
 
-        bool open();
+        bool check_device(bool print_debug = false);
         bool close();
 
         bool request_buffers();
@@ -135,11 +137,13 @@ public:
 class CameraX11 : public CameraServer {
 private:
 	struct v4l2_funcs funcs;
-	void* libv4l2;
+    void* libv4l2;
+	bool alive = false;
+    std::thread hotplug_thread;
+    void check_change();
 public:
 	CameraX11();
 	~CameraX11();
-	std::vector<V4l2_Device*> devices;
 
 	void update_feeds();
 };

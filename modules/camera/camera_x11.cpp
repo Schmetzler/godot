@@ -31,19 +31,17 @@
 #include "camera_x11.h"
 #include "servers/camera/camera_feed.h"
 
-#include <dirent.h>
 #include <vector>
 #include <string>
 #include <algorithm>
-#include <cstddef>
 #include <thread>
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -57,34 +55,36 @@
 
 // formats that can be used
 // mainly necessary if libv4l2 is not available
-std::vector<int> supported_formats{
+std::vector<__u32> supported_formats{
     V4L2_PIX_FMT_RGB24
 };
 
-int V4l2_Device::xioctl(unsigned long int request, void *arg){
+int V4l2_Device::xioctl(int fd, unsigned long int request, void *arg){
     int r;
 	do {
-        r = this->funcs->ioctl(this->fd, request, arg);
+        r = funcs->ioctl(fd, request, arg);
 	} while (-1 == r && (EINTR == errno || errno == EAGAIN));
 	return r;
 };
 
-V4l2_Device::V4l2_Device(const char *dev_name, struct v4l2_funcs *funcs) {
-    this->dev_name = std::string(dev_name);
+V4l2_Device::V4l2_Device(std::string dev_name, struct v4l2_funcs *funcs) {
+    this->dev_name = dev_name;
     this->funcs = funcs;
     this->use_libv4l2 = funcs->libv4l2;
 };
 
-bool V4l2_Device::open() {
+bool V4l2_Device::check_device(bool print_debug) {
+    // print_debug is used whether debug messages should be printed
+    // (as the devices are checked every second, which resulted in
+    // many useless print outs)
+    int fd = -1;
     struct stat st;
     if (-1 == stat(dev_name.c_str(), &st) || (!S_ISCHR(st.st_mode))){
     #ifdef DEBUG_ENABLED
-	    print_line("Device name " + String(dev_name.c_str()) + " not available.");
+        if(print_debug)
+	        print_line("Device name " + String(dev_name.c_str()) + " not available.");
     #endif
         return false;
-    }
-    if (fd != -1){
-        funcs->close(fd);
     }
 
     // open device
@@ -92,24 +92,29 @@ bool V4l2_Device::open() {
 
 	if (-1 == fd) {
     #ifdef DEBUG_ENABLED
-	    print_line("Cannot open device " + String(dev_name.c_str()) + ".");
+        if(print_debug)
+	        print_line("Cannot open device " + String(dev_name.c_str()) + ".");
     #endif
         return false;
     }
 
     CLEAR(cap);
-    if (-1 == xioctl(VIDIOC_QUERYCAP, &cap)) {
+    if (-1 == xioctl(fd, VIDIOC_QUERYCAP, &cap)) {
     #ifdef DEBUG_ENABLED
-	    print_line("Cannot query capabilities for " + String(dev_name.c_str()) + ".");
+        if(print_debug)
+	        print_line("Cannot query capabilities for " + String(dev_name.c_str()) + ".");
     #endif
         funcs->close(fd);
         return false;
     }
 
+    name = String((const char*) cap.card) + String(" (") + String(dev_name.c_str()) + String(")");
+
     // Check if it is a videocapture device
     if ((cap.device_caps & V4L2_CAP_VIDEO_CAPTURE) != V4L2_CAP_VIDEO_CAPTURE){
     #ifdef DEBUG_ENABLED
-	    print_line(String(dev_name.c_str()) + " is no video capture device.");
+        if(print_debug)
+	        print_line(String(dev_name.c_str()) + " is no video capture device.");
     #endif
         funcs->close(fd);
         return false;
@@ -119,7 +124,8 @@ bool V4l2_Device::open() {
     if (((cap.device_caps & V4L2_CAP_META_OUTPUT) == V4L2_CAP_META_OUTPUT)
         || ((cap.device_caps & V4L2_CAP_META_CAPTURE) == V4L2_CAP_META_CAPTURE)) {
     #ifdef DEBUG_ENABLED
-	    print_line(String(dev_name.c_str()) + " is just a meta information device.");
+        if(print_debug)
+	        print_line(String(dev_name.c_str()) + " is just a meta information device.");
     #endif        
         funcs->close(fd);
         return false;
@@ -132,7 +138,8 @@ bool V4l2_Device::open() {
         type = TYPE_IO_READ;
     } else {
     #ifdef DEBUG_ENABLED
-	    print_line(String(dev_name.c_str()) + " has no capability to capture frames.");
+        if(print_debug)
+	        print_line(String(dev_name.c_str()) + " has no capability to capture frames.");
     #endif
         funcs->close(fd);
         return false;
@@ -143,9 +150,10 @@ bool V4l2_Device::open() {
     fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
     // Get default size and format
-    if (-1 == this->xioctl(VIDIOC_G_FMT, &fmt)){
+    if (-1 == this->xioctl(fd, VIDIOC_G_FMT, &fmt)){
     #ifdef DEBUG_ENABLED
-	    print_line("Cannot grab default format from " + String(dev_name.c_str()) + ".");
+        if(print_debug)
+	        print_line("Cannot grab default format from " + String(dev_name.c_str()) + ".");
     #endif
         funcs->close(fd);
         return false;
@@ -154,26 +162,32 @@ bool V4l2_Device::open() {
     bool found = false;
     for(unsigned int i = 0; i < supported_formats.size(); ++i){
         fmt.fmt.pix.pixelformat = supported_formats[i];
-        if(-1 == xioctl(VIDIOC_S_FMT, &fmt)) {
-            if (errno == EBUSY) {
-            #ifdef DEBUG_ENABLED
-                print_line(String(dev_name.c_str()) + " is busy. Check for format.");
-            #endif
-                // If device is busy, check if it can use the format
-                // Device is still available even if it is busy
-                if (-1 == xioctl(VIDIOC_TRY_FMT, &fmt)) {
-                    continue;
-                }
-            } else {
-                continue;
-            }
+        // This commented code could be used if VIDIOC_TRY_FMT is not implemented
+        // in the driver, but it will interfere with current executed streams.
+        // if(-1 == xioctl(fd, VIDIOC_S_FMT, &fmt)) {
+        //     if (errno == EBUSY) {
+        //     #ifdef DEBUG_ENABLED
+        //         print_line(String(dev_name.c_str()) + " is busy. Check for format.");
+        //     #endif
+        //         // If device is busy, check if it can use the format
+        //         // Device is still available even if it is busy
+        //         if (-1 == xioctl(fd, VIDIOC_TRY_FMT, &fmt)) {
+        //             continue;
+        //         }
+        //     } else {
+        //         continue;
+        //     }
+        // }
+        if(-1 == xioctl(fd, VIDIOC_TRY_FMT, &fmt)){
+            continue;
         }
         found = true;
         break;
     }
     if (!found) {
     #ifdef DEBUG_ENABLED
-	    print_line(String(dev_name.c_str()) + " has no supported pixelformat.");
+        if(print_debug)
+	        print_line(String(dev_name.c_str()) + " has no supported pixelformat.");
     #endif
         funcs->close(fd);
         return false;
@@ -190,15 +204,9 @@ bool V4l2_Device::open() {
         buffer_size = min;
 
     funcs->close(fd);
-    fd = funcs->open(dev_name.c_str(), O_RDWR | O_NONBLOCK, 0);
-    if(fd == -1) {
-        return false;
-    }
 
-    name = String((const char*) cap.card) + String(" (") + String(dev_name.c_str()) + String(")");
-    opened = true;
-
-    // Now the device is opened... To start streaming the fmt must be set and the buffers must be prepared.
+    // Now the device can be opened... 
+    // To start streaming the fmt must be set and the buffers must be prepared.
     return true;
 }
 
@@ -215,7 +223,22 @@ bool V4l2_Device::close() {
 }
 
 bool V4l2_Device::request_buffers() {
-    if(-1 == xioctl(VIDIOC_S_FMT, &fmt)) {
+    // open device
+    if(fd != -1) {
+        funcs->close(fd);
+        fd = -1;
+    }
+	fd = funcs->open(dev_name.c_str(), O_RDWR | O_NONBLOCK, 0);
+    opened=true;
+
+	if (-1 == fd) {
+    #ifdef DEBUG_ENABLED
+	    print_line("Cannot open device " + String(dev_name.c_str()) + ".");
+    #endif
+        return false;
+    }
+
+    if(-1 == xioctl(fd, VIDIOC_S_FMT, &fmt)) {
     #ifdef DEBUG_ENABLED
 	    print_line("Cannot set format for " + String(dev_name.c_str()) + ".");
     #endif
@@ -258,7 +281,7 @@ bool V4l2_Device::request_buffers() {
             req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
             req.memory = V4L2_MEMORY_MMAP;
 
-            int r = xioctl(VIDIOC_REQBUFS, &req);
+            int r = xioctl(fd, VIDIOC_REQBUFS, &req);
             if (r == -1 && EINVAL == errno) {
                 type = TYPE_IO_USRPTR;
                 break;
@@ -283,7 +306,7 @@ bool V4l2_Device::request_buffers() {
                     buf.memory      = V4L2_MEMORY_MMAP;
                     buf.index       = n_buffers;
 
-                    if (-1 == xioctl(VIDIOC_QUERYBUF, &buf))
+                    if (-1 == xioctl(fd, VIDIOC_QUERYBUF, &buf))
                         return false;
 
                     buffers[n_buffers].length = buf.length;
@@ -304,6 +327,9 @@ bool V4l2_Device::request_buffers() {
     default:
         break;
     }
+    // must use two switch statements
+    // as TYPE_IO_USRPTR can only be determined
+    // during VIDIOC_REQBUFS
     switch(type) {
     case TYPE_IO_NONE:
         return false;
@@ -315,7 +341,7 @@ bool V4l2_Device::request_buffers() {
             req.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
             req.memory = V4L2_MEMORY_USERPTR;
 
-            if (-1 == xioctl(VIDIOC_REQBUFS, &req)) {
+            if (-1 == xioctl(fd, VIDIOC_REQBUFS, &req)) {
                 return false;
             }
 
@@ -381,6 +407,7 @@ V4l2_Device::~V4l2_Device() {
 bool V4l2_Device::start_streaming(Ref<CameraFeed> feed) {
     enum v4l2_buf_type b_type;
 
+    // start streaming depending on type
     switch (type) {
     case TYPE_IO_MMAP:
         {
@@ -390,11 +417,11 @@ bool V4l2_Device::start_streaming(Ref<CameraFeed> feed) {
                 buf.memory = V4L2_MEMORY_MMAP;
                 buf.index = i;
 
-                if (-1 == xioctl(VIDIOC_QBUF, &buf))
+                if (-1 == xioctl(fd, VIDIOC_QBUF, &buf))
                     return false;
             }
             b_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-            if (-1 == xioctl(VIDIOC_STREAMON, &b_type))
+            if (-1 == xioctl(fd, VIDIOC_STREAMON, &b_type))
                 return false;
             break;
         }
@@ -410,11 +437,11 @@ bool V4l2_Device::start_streaming(Ref<CameraFeed> feed) {
                 buf.m.userptr = (unsigned long) buffers[i].start;
                 buf.length = buffers[i].length;
 
-                if (-1 == xioctl(VIDIOC_QBUF, &buf))
+                if (-1 == xioctl(fd, VIDIOC_QBUF, &buf))
                     return false;
             }
             b_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-            if (-1 == xioctl(VIDIOC_STREAMON, &b_type))
+            if (-1 == xioctl(fd, VIDIOC_STREAMON, &b_type))
                 return false;
             break;
         }
@@ -437,7 +464,7 @@ void V4l2_Device::stop_streaming() {
     case TYPE_IO_USRPTR:
         enum v4l2_buf_type b_type;
         b_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        if (-1 == xioctl(VIDIOC_STREAMOFF, &b_type))
+        if (-1 == xioctl(fd, VIDIOC_STREAMOFF, &b_type))
             ;
         break;
     default:
@@ -450,6 +477,7 @@ void V4l2_Device::stream_image(Ref<CameraFeed> feed) {
     struct timeval tv;
     int r;
     while(this->streaming){
+        // check if new image available
         do {
             FD_ZERO(&fds);
             FD_SET(this->fd, &fds);
@@ -462,9 +490,10 @@ void V4l2_Device::stream_image(Ref<CameraFeed> feed) {
         } while(-1 == r && (EINTR == errno || EAGAIN == errno));
         if (r <= 0) {
             return;
-            // errno_exit("select");
         }
 
+        // grab image depending on the type of image grabbing
+        // currently only tested for TYPE_IO_MMAP
         switch (type) {
         case TYPE_IO_READ:
             {
@@ -488,7 +517,7 @@ void V4l2_Device::stream_image(Ref<CameraFeed> feed) {
                 buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
                 buf.memory = V4L2_MEMORY_MMAP;
 
-                if (-1 == xioctl(VIDIOC_DQBUF, &buf)) {
+                if (-1 == xioctl(fd, VIDIOC_DQBUF, &buf)) {
                     switch (errno) {
                     case EAGAIN:
                         continue;
@@ -500,7 +529,7 @@ void V4l2_Device::stream_image(Ref<CameraFeed> feed) {
 
                 get_image(feed, (uint8_t *) (buffers[buf.index].start));
 
-                if (-1 == xioctl(VIDIOC_QBUF, &buf))
+                if (-1 == xioctl(fd, VIDIOC_QBUF, &buf))
                     return;
                 break;
             }
@@ -511,7 +540,7 @@ void V4l2_Device::stream_image(Ref<CameraFeed> feed) {
                 buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
                 buf.memory = V4L2_MEMORY_USERPTR;
 
-                if (-1 == xioctl(VIDIOC_DQBUF, &buf)) {
+                if (-1 == xioctl(fd, VIDIOC_DQBUF, &buf)) {
                     switch (errno) {
                     case EAGAIN:
                         continue;
@@ -528,7 +557,7 @@ void V4l2_Device::stream_image(Ref<CameraFeed> feed) {
 
                 get_image(feed, (uint8_t *) (buf.m.userptr));
 
-                if (-1 == xioctl(VIDIOC_QBUF, &buf))
+                if (-1 == xioctl(fd, VIDIOC_QBUF, &buf))
                     return;
                 break;
             }
@@ -538,27 +567,36 @@ void V4l2_Device::stream_image(Ref<CameraFeed> feed) {
     }
 }
 
-// This one is entirely format dependent
 void V4l2_Device::get_image(Ref<CameraFeed> feed, uint8_t* buffer) {
     Ref<Image> img;
     img.instance();
 
-    if (-1 == xioctl(VIDIOC_G_FMT, &fmt)){
+    if (-1 == xioctl(fd, VIDIOC_G_FMT, &fmt)){
         return;
     }
 
-    if( width != fmt.fmt.pix.width || height != fmt.fmt.pix.height ) {
-        width = fmt.fmt.pix.width;
-        height = fmt.fmt.pix.height;
-        img_data.resize(width * height * 3);
+    // other format implementations should be put here.
+    // Mainly useful if libv4l2 is not installed
+    switch(fmt.fmt.pix.pixelformat){
+    case V4L2_PIX_FMT_RGB24:
+        {
+            if( width != fmt.fmt.pix.width || height != fmt.fmt.pix.height ) {
+                width = fmt.fmt.pix.width;
+                height = fmt.fmt.pix.height;
+                img_data.resize(width * height * 3);
+            }
+
+            PoolVector<uint8_t>::Write w = img_data.write();
+            // TODO: Buffer is 1024 Byte longer?
+            memcpy(w.ptr(), buffer, width*height*3);
+
+            img->create(width, height, 0, Image::FORMAT_RGB8, img_data);
+            feed->set_RGB_img(img);
+            break;
+        }
+    default:
+        break;
     }
-
-    PoolVector<uint8_t>::Write w = img_data.write();
-    // TODO: Buffer is 1024 Byte longer?
-    memcpy(w.ptr(), buffer, width*height*3);
-
-    img->create(width, height, 0, Image::FORMAT_RGB8, img_data);
-    feed->set_RGB_img(img);
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -577,25 +615,22 @@ void CameraFeedX11::set_device(V4l2_Device *p_device) {
 
 	// get some info
 	name = device->name;
+    // I do not think that another position is possible on linux
 	position = CameraFeed::FEED_UNSPECIFIED;
-	// if ([p_device position] == AVCaptureDevicePositionBack) {
-	// 	position = CameraFeed::FEED_BACK;
-	// } else if ([p_device position] == AVCaptureDevicePositionFront) {
-	// 	position = CameraFeed::FEED_FRONT;
-	// };
 };
 
 CameraFeedX11::~CameraFeedX11() {
     this->deactivate_feed();
     if (device != NULL) {
-        delete device;
+        memdelete(device);
         device = NULL;
     }
 };
 
 bool CameraFeedX11::activate_feed() {
+    // activate streaming if not already
 	if (!device->streaming) {
-        if(!device->open()) {
+        if(!device->check_device()) {
             return false;
         }
         if(!device->request_buffers()) {
@@ -625,6 +660,7 @@ void CameraX11::update_feeds() {
     DIR *dir;
     struct dirent *ent;
     auto devs = std::vector<std::string>();
+    // check the /dev/ directory for video entries
     if ((dir = opendir ("/dev/")) != NULL) {
         /* print all the files and directories within directory */
         while ((ent = readdir (dir)) != NULL) {
@@ -634,30 +670,72 @@ void CameraX11::update_feeds() {
         }
         closedir (dir);
     }
+    // sort so we start with video0
     std::sort(devs.begin(), devs.end());
-    for(unsigned int i = 0; i < devs.size(); ++i) {
-        V4l2_Device *dev = new V4l2_Device(devs[i].c_str(), &this->funcs);
-        if (dev->open()) {
-            dev->close();
-            Ref<CameraFeedX11> newfeed;
-			newfeed.instance();
-			newfeed->set_device(dev);
 
-			// assume display camera so inverse
-			Transform2D transform = Transform2D(-1.0, 0.0, 0.0, -1.0, 1.0, 1.0);
-			newfeed->set_transform(transform);
+    int j;
+    unsigned int i;
+    std::vector<std::string>::iterator it;
 
-			add_feed(newfeed);
+    // remove missing feeds
+    for(j = 0; j < feeds.size(); ++j){
+        Ref<CameraFeedX11> feed = (Ref<CameraFeedX11>)feeds[j];
+        std::string dev_name = feed->get_device()->dev_name;
+        it = std::find(devs.begin(), devs.end(), dev_name);
+        // also check if device is still openable
+        if(it == devs.end() || !feed->get_device()->check_device(!alive)) {
+            remove_feed(feed);
+        }
+    }
+
+    for(i = 0; i < devs.size(); ++i) {
+        // keep existing devices
+        // currently only check by /dev/video* name
+        bool found = false;
+        for (j = 0; j < feeds.size(); ++j) {
+            Ref<CameraFeedX11> feed = (Ref<CameraFeedX11>)feeds[j];
+            if(devs[i] == feed->get_device()->dev_name) {
+                found=true;
+                break;
+            }
+        }
+        if(!found){
+            // create new device and check if it is compatible
+            V4l2_Device *dev = memnew(V4l2_Device(devs[i].c_str(), &this->funcs));
+            if (dev->check_device(!alive)) {
+                Ref<CameraFeedX11> newfeed;
+                newfeed.instance();
+                newfeed->set_device(dev);
+
+                // assume display camera so inverse
+                Transform2D transform = Transform2D(-1.0, 0.0, 0.0, -1.0, 1.0, 1.0);
+                newfeed->set_transform(transform);
+
+                add_feed(newfeed);
+            } else {
+                memdelete(dev);
+            }
         }
     }
 };
 
+void CameraX11::check_change() {
+    // simple hotplug functionality
+    // checks for new cameras (or removed cameras)
+    // every second.
+    while(alive){
+        update_feeds();
+        usleep(1000000);
+    }
+}
+
 CameraX11::CameraX11() {
-	// // Find available cameras we have at this time
-    this->devices = std::vector<V4l2_Device*>();
-    this->libv4l2 = dlopen("libv4l2.so", RTLD_NOW);
+    // determine if libv4l2 is installed and
+    // set functions appropriately
+    libv4l2 = dlopen("libv4l2.so.0", RTLD_NOW);
 
     if (libv4l2 == NULL) {
+        // the default v4l2 functions
         this->funcs.open = &open;
         this->funcs.close = &close;
         this->funcs.dup = &dup;
@@ -666,7 +744,11 @@ CameraX11::CameraX11() {
         this->funcs.mmap = &mmap;
         this->funcs.munmap = &munmap;
         this->funcs.libv4l2 = false;
+    #ifdef DEBUG_ENABLED
+        print_line("libv4l2.so not found. Try standard v4l2 instead.");
+    #endif
     } else {
+        // the libv4l2 functions
         this->funcs.open = (int (*)(const char*, int, ...)) dlsym(libv4l2, "v4l2_open");
         this->funcs.close = (int (*)(int)) dlsym(libv4l2, "v4l2_close");
         this->funcs.dup = (int (*)(int)) dlsym(libv4l2, "v4l2_dup");
@@ -675,17 +757,31 @@ CameraX11::CameraX11() {
         this->funcs.mmap = (void* (*) (void*, size_t, int, int, int, int64_t)) dlsym(libv4l2, "v4l2_mmap");
         this->funcs.munmap = (int (*) (void*, size_t)) dlsym(libv4l2, "v4l2_munmap");
         this->funcs.libv4l2 = true;
+    #ifdef DEBUG_ENABLED
+        print_line("libv4l2 found.");
+    #endif
     }
 
-	update_feeds();
+	// Find available cameras we have at this time
+    update_feeds();
 
-	// // should only have one of these....
-	// device_notifications = [[MyDeviceNotifications alloc] initForServer:this];
+    // start the hotplug thread
+    // alive is also used to trigger debug output
+    // (as devices that are incompatible would always be checked
+    // and therefore print always debug messages)
+    alive = true;
+    hotplug_thread = std::thread(&CameraX11::check_change, this);
 };
 
 CameraX11::~CameraX11() {
+    // end the hotplug thread
+    alive = false;
+    if(hotplug_thread.joinable()){
+        hotplug_thread.join();
+    }
+
+    // close the library
     if (this->libv4l2 != NULL) {
         dlclose(this->libv4l2);
     }
-	// [device_notifications release];
 };
