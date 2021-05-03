@@ -31,24 +31,24 @@
 #include "camera_x11.h"
 #include "servers/camera/camera_feed.h"
 
-#include <vector>
-#include <string>
 #include <algorithm>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include <dirent.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <unistd.h>
 
-#include <libv4l2.h>
 #include <linux/videodev2.h>
 
 #define CLEAR(x) memset(&(x), 0, sizeof(x))
@@ -62,8 +62,8 @@ std::vector<__u32> supported_formats{
 int V4l2_Device::xioctl(int fd, unsigned long int request, void *arg){
     int r;
 	do {
-        r = funcs->ioctl(fd, request, arg);
-	} while (-1 == r && (EINTR == errno || errno == EAGAIN));
+		r = funcs->ioctl(fd, request, arg);
+	} while (r == -1 && (errno == EINTR || errno == EAGAIN));
 	return r;
 };
 
@@ -74,140 +74,139 @@ V4l2_Device::V4l2_Device(std::string dev_name, struct v4l2_funcs *funcs) {
 };
 
 bool V4l2_Device::check_device(bool print_debug) {
-    // print_debug is used whether debug messages should be printed
-    // (as the devices are checked every second, which resulted in
-    // many useless print outs)
-    int fd = -1;
-    struct stat st;
-    if (-1 == stat(dev_name.c_str(), &st) || (!S_ISCHR(st.st_mode))){
-    #ifdef DEBUG_ENABLED
-        if(print_debug)
-	        print_line("Device name " + String(dev_name.c_str()) + " not available.");
-    #endif
-        return false;
-    }
+	// print_debug is used whether debug messages should be printed
+	// (as the devices are checked every second, which resulted in
+	// many useless print outs)
+	int fd = -1;
+	struct stat st;
+	if (stat(dev_name.c_str(), &st) == -1 || (!S_ISCHR(st.st_mode))) {
+#ifdef DEBUG_ENABLED
+		if (print_debug)
+			print_line("Device name " + String(dev_name.c_str()) + " not available.");
+#endif
+		return false;
+	}
 
-    // open device
+	// open device
 	fd = funcs->open(dev_name.c_str(), O_RDWR | O_NONBLOCK, 0);
 
-	if (-1 == fd) {
-    #ifdef DEBUG_ENABLED
-        if(print_debug)
-	        print_line("Cannot open device " + String(dev_name.c_str()) + ".");
-    #endif
-        return false;
-    }
+	if (fd == -1) {
+#ifdef DEBUG_ENABLED
+		if (print_debug)
+			print_line("Cannot open device " + String(dev_name.c_str()) + ".");
+#endif
+		return false;
+	}
 
-    CLEAR(cap);
-    if (-1 == xioctl(fd, VIDIOC_QUERYCAP, &cap)) {
-    #ifdef DEBUG_ENABLED
-        if(print_debug)
-	        print_line("Cannot query capabilities for " + String(dev_name.c_str()) + ".");
-    #endif
-        funcs->close(fd);
-        return false;
-    }
+	CLEAR(cap);
+	if (xioctl(fd, VIDIOC_QUERYCAP, &cap) == -1) {
+#ifdef DEBUG_ENABLED
+		if (print_debug)
+			print_line("Cannot query capabilities for " + String(dev_name.c_str()) + ".");
+#endif
+		funcs->close(fd);
+		return false;
+	}
 
-    name = String((const char*) cap.card) + String(" (") + String(dev_name.c_str()) + String(")");
+	name = String((const char *)cap.card) + String(" (") + String(dev_name.c_str()) + String(")");
 
-    // Check if it is a videocapture device
-    if ((cap.device_caps & V4L2_CAP_VIDEO_CAPTURE) != V4L2_CAP_VIDEO_CAPTURE){
-    #ifdef DEBUG_ENABLED
-        if(print_debug)
-	        print_line(String(dev_name.c_str()) + " is no video capture device.");
-    #endif
-        funcs->close(fd);
-        return false;
-    }
+	// Check if it is a videocapture device
+	if ((cap.device_caps & V4L2_CAP_VIDEO_CAPTURE) != V4L2_CAP_VIDEO_CAPTURE) {
+#ifdef DEBUG_ENABLED
+		if (print_debug)
+			print_line(String(dev_name.c_str()) + " is no video capture device.");
+#endif
+		funcs->close(fd);
+		return false;
+	}
 
-    // if its just a meta data device (unused)
-    if (((cap.device_caps & V4L2_CAP_META_OUTPUT) == V4L2_CAP_META_OUTPUT)
-        || ((cap.device_caps & V4L2_CAP_META_CAPTURE) == V4L2_CAP_META_CAPTURE)) {
-    #ifdef DEBUG_ENABLED
-        if(print_debug)
-	        print_line(String(dev_name.c_str()) + " is just a meta information device.");
-    #endif        
-        funcs->close(fd);
-        return false;
-    }
+	// if its just a meta data device (unused)
+	if (((cap.device_caps & V4L2_CAP_META_OUTPUT) == V4L2_CAP_META_OUTPUT) || ((cap.device_caps & V4L2_CAP_META_CAPTURE) == V4L2_CAP_META_CAPTURE)) {
+#ifdef DEBUG_ENABLED
+		if (print_debug)
+			print_line(String(dev_name.c_str()) + " is just a meta information device.");
+#endif
+		funcs->close(fd);
+		return false;
+	}
 
-    // How the image data can be accessed
-    if ((cap.capabilities & V4L2_CAP_STREAMING) == V4L2_CAP_STREAMING) {
-        type = TYPE_IO_MMAP;
-    } else if((cap.capabilities & V4L2_CAP_READWRITE) == V4L2_CAP_READWRITE) {
-        type = TYPE_IO_READ;
-    } else {
-    #ifdef DEBUG_ENABLED
-        if(print_debug)
-	        print_line(String(dev_name.c_str()) + " has no capability to capture frames.");
-    #endif
-        funcs->close(fd);
-        return false;
-    }
+	// How the image data can be accessed
+	if ((cap.capabilities & V4L2_CAP_STREAMING) == V4L2_CAP_STREAMING) {
+		type = TYPE_IO_MMAP;
+	} else if ((cap.capabilities & V4L2_CAP_READWRITE) == V4L2_CAP_READWRITE) {
+		type = TYPE_IO_READ;
+	} else {
+#ifdef DEBUG_ENABLED
+		if (print_debug)
+			print_line(String(dev_name.c_str()) + " has no capability to capture frames.");
+#endif
+		funcs->close(fd);
+		return false;
+	}
 
-    // Check if device supports supported formats
-    CLEAR(fmt);
-    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	// Check if device supports supported formats
+	CLEAR(fmt);
+	fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
-    // Get default size and format
-    if (-1 == this->xioctl(fd, VIDIOC_G_FMT, &fmt)){
-    #ifdef DEBUG_ENABLED
-        if(print_debug)
-	        print_line("Cannot grab default format from " + String(dev_name.c_str()) + ".");
-    #endif
-        funcs->close(fd);
-        return false;
-    }
-    fmt.fmt.pix.field = V4L2_FIELD_INTERLACED;
-    bool found = false;
-    for(unsigned int i = 0; i < supported_formats.size(); ++i){
-        fmt.fmt.pix.pixelformat = supported_formats[i];
-        // This commented code could be used if VIDIOC_TRY_FMT is not implemented
-        // in the driver, but it will interfere with current executed streams.
-        // if(-1 == xioctl(fd, VIDIOC_S_FMT, &fmt)) {
-        //     if (errno == EBUSY) {
-        //     #ifdef DEBUG_ENABLED
-        //         print_line(String(dev_name.c_str()) + " is busy. Check for format.");
-        //     #endif
-        //         // If device is busy, check if it can use the format
-        //         // Device is still available even if it is busy
-        //         if (-1 == xioctl(fd, VIDIOC_TRY_FMT, &fmt)) {
-        //             continue;
-        //         }
-        //     } else {
-        //         continue;
-        //     }
-        // }
-        if(-1 == xioctl(fd, VIDIOC_TRY_FMT, &fmt)){
-            continue;
-        }
-        found = true;
-        break;
-    }
-    if (!found) {
-    #ifdef DEBUG_ENABLED
-        if(print_debug)
-	        print_line(String(dev_name.c_str()) + " has no supported pixelformat.");
-    #endif
-        funcs->close(fd);
-        return false;
-    }
+	// Get default size and format
+	if (xioctl(fd, VIDIOC_G_FMT, &fmt) == -1) {
+#ifdef DEBUG_ENABLED
+		if (print_debug)
+			print_line("Cannot grab default format from " + String(dev_name.c_str()) + ".");
+#endif
+		funcs->close(fd);
+		return false;
+	}
+	fmt.fmt.pix.field = V4L2_FIELD_INTERLACED;
+	bool found = false;
+	for (unsigned int i = 0; i < supported_formats.size(); ++i) {
+		fmt.fmt.pix.pixelformat = supported_formats[i];
+		// This commented code could be used if VIDIOC_TRY_FMT is not implemented
+		// in the driver, but it will interfere with current executed streams.
+		// if(-1 == xioctl(fd, VIDIOC_S_FMT, &fmt)) {
+		//     if (errno == EBUSY) {
+		//     #ifdef DEBUG_ENABLED
+		//         print_line(String(dev_name.c_str()) + " is busy. Check for format.");
+		//     #endif
+		//         // If device is busy, check if it can use the format
+		//         // Device is still available even if it is busy
+		//         if (-1 == xioctl(fd, VIDIOC_TRY_FMT, &fmt)) {
+		//             continue;
+		//         }
+		//     } else {
+		//         continue;
+		//     }
+		// }
+		if (xioctl(fd, VIDIOC_TRY_FMT, &fmt) == -1) {
+			continue;
+		}
+		found = true;
+		break;
+	}
+	if (!found) {
+#ifdef DEBUG_ENABLED
+		if (print_debug)
+			print_line(String(dev_name.c_str()) + " has no supported pixelformat.");
+#endif
+		funcs->close(fd);
+		return false;
+	}
 
-    /* Buggy driver paranoia. */
-    unsigned int min = fmt.fmt.pix.width * 2;
-    unsigned int bpl = fmt.fmt.pix.bytesperline;
-    if (bpl < min)
-        bpl = min;
-    min = bpl * fmt.fmt.pix.height;
-    buffer_size = fmt.fmt.pix.sizeimage;
-    if (buffer_size < min)
-        buffer_size = min;
+	/* Buggy driver paranoia. */
+	unsigned int min = fmt.fmt.pix.width * 2;
+	unsigned int bpl = fmt.fmt.pix.bytesperline;
+	if (bpl < min)
+		bpl = min;
+	min = bpl * fmt.fmt.pix.height;
+	buffer_size = fmt.fmt.pix.sizeimage;
+	if (buffer_size < min)
+		buffer_size = min;
 
-    funcs->close(fd);
+	funcs->close(fd);
 
-    // Now the device can be opened... 
-    // To start streaming the fmt must be set and the buffers must be prepared.
-    return true;
+	// Now the device can be opened...
+	// To start streaming the fmt must be set and the buffers must be prepared.
+	return true;
 }
 
 bool V4l2_Device::close() {
@@ -231,143 +230,139 @@ bool V4l2_Device::request_buffers() {
 	fd = funcs->open(dev_name.c_str(), O_RDWR | O_NONBLOCK, 0);
     opened=true;
 
-	if (-1 == fd) {
-    #ifdef DEBUG_ENABLED
-	    print_line("Cannot open device " + String(dev_name.c_str()) + ".");
-    #endif
-        return false;
-    }
+	if (fd == -1) {
+#ifdef DEBUG_ENABLED
+		print_line("Cannot open device " + String(dev_name.c_str()) + ".");
+#endif
+		return false;
+	}
 
-    if(-1 == xioctl(fd, VIDIOC_S_FMT, &fmt)) {
-    #ifdef DEBUG_ENABLED
-	    print_line("Cannot set format for " + String(dev_name.c_str()) + ".");
-    #endif
-        return false;
-    }
+	if (xioctl(fd, VIDIOC_S_FMT, &fmt) == -1) {
+#ifdef DEBUG_ENABLED
+		print_line("Cannot set format for " + String(dev_name.c_str()) + ".");
+#endif
+		return false;
+	}
 
-    width = 0;
-    height = 0;
+	width = 0;
+	height = 0;
 
-    struct v4l2_requestbuffers req;
+	struct v4l2_requestbuffers req;
 
-    switch(type){
-    case TYPE_IO_READ:
-        {
-            buffers = (V4l2_Device::buffer*) calloc(1, sizeof(*buffers));
+	switch (type) {
+		case TYPE_IO_READ: {
+			buffers = (V4l2_Device::buffer *)calloc(1, sizeof(*buffers));
 
-            if (!buffers) {
-                #ifdef DEBUG_ENABLED
-	                print_line(String(dev_name.c_str()) + ": Out of memory");
-                #endif
-                return false;
-            }
+			if (!buffers) {
+#ifdef DEBUG_ENABLED
+				print_line(String(dev_name.c_str()) + ": Out of memory");
+#endif
+				return false;
+			}
 
-            buffers[0].length = buffer_size;
-            buffers[0].start = malloc(buffer_size);
+			buffers[0].length = buffer_size;
+			buffers[0].start = malloc(buffer_size);
 
-            if (!buffers[0].start) {
-                #ifdef DEBUG_ENABLED
-	                print_line(String(dev_name.c_str()) + ": Out of memory");
-                #endif
-                return false;
-            }
-            break;
-        }
-    case TYPE_IO_MMAP:
-        {
-            CLEAR(req);
+			if (!buffers[0].start) {
+#ifdef DEBUG_ENABLED
+				print_line(String(dev_name.c_str()) + ": Out of memory");
+#endif
+				return false;
+			}
+			break;
+		}
+		case TYPE_IO_MMAP: {
+			CLEAR(req);
 
-            req.count = 4;
-            req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-            req.memory = V4L2_MEMORY_MMAP;
+			req.count = 4;
+			req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+			req.memory = V4L2_MEMORY_MMAP;
 
-            int r = xioctl(fd, VIDIOC_REQBUFS, &req);
-            if (r == -1 && EINVAL == errno) {
-                type = TYPE_IO_USRPTR;
-                break;
-                // the switch statement should go to the next level
-            } else if (r == -1) {
-                return false;
-            } else {
-                if (req.count < 2)
-                    // fprintf(stderr, "Insufficient buffer memory on %s\n", dev_name);
-                    return false;
-                buffers = (V4l2_Device::buffer*) calloc(req.count, sizeof(*buffers));
+			int r = xioctl(fd, VIDIOC_REQBUFS, &req);
+			if (r == -1 && errno == EINVAL) {
+				type = TYPE_IO_USRPTR;
+				break;
+				// the switch statement should go to the next level
+			} else if (r == -1) {
+				return false;
+			} else {
+				if (req.count < 2)
+					// fprintf(stderr, "Insufficient buffer memory on %s\n", dev_name);
+					return false;
+				buffers = (V4l2_Device::buffer *)calloc(req.count, sizeof(*buffers));
 
-                if (!buffers) {
-                    // fprintf(stderr, "Out of memory\n");
-                    return false;
-                }
+				if (!buffers) {
+					// fprintf(stderr, "Out of memory\n");
+					return false;
+				}
 
-                for (n_buffers = 0; n_buffers < req.count; ++n_buffers) {
-                    CLEAR(buf);
+				for (n_buffers = 0; n_buffers < req.count; ++n_buffers) {
+					CLEAR(buf);
 
-                    buf.type        = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-                    buf.memory      = V4L2_MEMORY_MMAP;
-                    buf.index       = n_buffers;
+					buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+					buf.memory = V4L2_MEMORY_MMAP;
+					buf.index = n_buffers;
 
-                    if (-1 == xioctl(fd, VIDIOC_QUERYBUF, &buf))
-                        return false;
+					if (xioctl(fd, VIDIOC_QUERYBUF, &buf) == -1)
+						return false;
 
-                    buffers[n_buffers].length = buf.length;
-                    buffers[n_buffers].start = funcs->mmap(
-                        NULL /* start anywhere */,
-                        buf.length,
-                        PROT_READ | PROT_WRITE /* required */,
-                        MAP_SHARED /* recommended */,
-                        fd, buf.m.offset
-                    );
+					buffers[n_buffers].length = buf.length;
+					buffers[n_buffers].start = funcs->mmap(
+							NULL /* start anywhere */,
+							buf.length,
+							PROT_READ | PROT_WRITE /* required */,
+							MAP_SHARED /* recommended */,
+							fd, buf.m.offset);
 
-                    if (MAP_FAILED == buffers[n_buffers].start)
-                        return false;
-                }
-                break;
-            }
-        }
-    default:
-        break;
-    }
-    // must use two switch statements
-    // as TYPE_IO_USRPTR can only be determined
-    // during VIDIOC_REQBUFS
-    switch(type) {
-    case TYPE_IO_NONE:
-        return false;
-    case TYPE_IO_USRPTR:
-        {
-            CLEAR(req);
+					if (buffers[n_buffers].start == MAP_FAILED)
+						return false;
+				}
+				break;
+			}
+		}
+		default:
+			break;
+	}
+	// must use two switch statements
+	// as TYPE_IO_USRPTR can only be determined
+	// during VIDIOC_REQBUFS
+	switch (type) {
+		case TYPE_IO_NONE:
+			return false;
+		case TYPE_IO_USRPTR: {
+			CLEAR(req);
 
-            req.count  = 4;
-            req.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-            req.memory = V4L2_MEMORY_USERPTR;
+			req.count = 4;
+			req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+			req.memory = V4L2_MEMORY_USERPTR;
 
-            if (-1 == xioctl(fd, VIDIOC_REQBUFS, &req)) {
-                return false;
-            }
+			if (xioctl(fd, VIDIOC_REQBUFS, &req) == -1) {
+				return false;
+			}
 
-            buffers = (V4l2_Device::buffer*) calloc(4, sizeof(*buffers));
+			buffers = (V4l2_Device::buffer *)calloc(4, sizeof(*buffers));
 
-            if (!buffers) {
-                //fprintf(stderr, "Out of memory\n");
-                return false;
-            }
+			if (!buffers) {
+				//fprintf(stderr, "Out of memory\n");
+				return false;
+			}
 
-            for (n_buffers = 0; n_buffers < 4; ++n_buffers) {
-                buffers[n_buffers].length = buffer_size;
-                buffers[n_buffers].start = malloc(buffer_size);
+			for (n_buffers = 0; n_buffers < 4; ++n_buffers) {
+				buffers[n_buffers].length = buffer_size;
+				buffers[n_buffers].start = malloc(buffer_size);
 
-                if (!buffers[n_buffers].start) {
-                    // fprintf(stderr, "Out of memory\n");
-                    return false;
-                }
-            }
-            break;
-        }
-    default:
-        break;
-    }
-    buffer_available = true;
-    return true;
+				if (!buffers[n_buffers].start) {
+					// fprintf(stderr, "Out of memory\n");
+					return false;
+				}
+			}
+			break;
+		}
+		default:
+			break;
+	}
+	buffer_available = true;
+	return true;
 }
 
 void V4l2_Device::cleanup_buffers() {
@@ -405,53 +400,51 @@ V4l2_Device::~V4l2_Device() {
 }
 
 bool V4l2_Device::start_streaming(Ref<CameraFeed> feed) {
-    enum v4l2_buf_type b_type;
+	enum v4l2_buf_type b_type;
 
-    // start streaming depending on type
-    switch (type) {
-    case TYPE_IO_MMAP:
-        {
-            for (unsigned int i = 0; i < n_buffers; ++i) {
-                CLEAR(buf);
-                buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-                buf.memory = V4L2_MEMORY_MMAP;
-                buf.index = i;
+	// start streaming depending on type
+	switch (type) {
+		case TYPE_IO_MMAP: {
+			for (unsigned int i = 0; i < n_buffers; ++i) {
+				CLEAR(buf);
+				buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+				buf.memory = V4L2_MEMORY_MMAP;
+				buf.index = i;
 
-                if (-1 == xioctl(fd, VIDIOC_QBUF, &buf))
-                    return false;
-            }
-            b_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-            if (-1 == xioctl(fd, VIDIOC_STREAMON, &b_type))
-                return false;
-            break;
-        }
-    case TYPE_IO_USRPTR:
-        {
-            for (unsigned int i = 0; i < n_buffers; ++i) {
-                struct v4l2_buffer buf;
+				if (xioctl(fd, VIDIOC_QBUF, &buf) == -1)
+					return false;
+			}
+			b_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+			if (xioctl(fd, VIDIOC_STREAMON, &b_type) == -1)
+				return false;
+			break;
+		}
+		case TYPE_IO_USRPTR: {
+			for (unsigned int i = 0; i < n_buffers; ++i) {
+				struct v4l2_buffer buf;
 
-                CLEAR(buf);
-                buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-                buf.memory = V4L2_MEMORY_USERPTR;
-                buf.index = i;
-                buf.m.userptr = (unsigned long) buffers[i].start;
-                buf.length = buffers[i].length;
+				CLEAR(buf);
+				buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+				buf.memory = V4L2_MEMORY_USERPTR;
+				buf.index = i;
+				buf.m.userptr = (unsigned long)buffers[i].start;
+				buf.length = buffers[i].length;
 
-                if (-1 == xioctl(fd, VIDIOC_QBUF, &buf))
-                    return false;
-            }
-            b_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-            if (-1 == xioctl(fd, VIDIOC_STREAMON, &b_type))
-                return false;
-            break;
-        }
-    default:
-        break;
-    }
+				if (xioctl(fd, VIDIOC_QBUF, &buf) == -1)
+					return false;
+			}
+			b_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+			if (xioctl(fd, VIDIOC_STREAMON, &b_type) == -1)
+				return false;
+			break;
+		}
+		default:
+			break;
+	}
 
-    streaming = true;
-    stream_thread = std::thread(&V4l2_Device::stream_image, this, feed);
-    return true;
+	streaming = true;
+	stream_thread = std::thread(&V4l2_Device::stream_image, this, feed);
+	return true;
 };
 
 void V4l2_Device::stop_streaming() {
@@ -473,130 +466,125 @@ void V4l2_Device::stop_streaming() {
 }
 
 void V4l2_Device::stream_image(Ref<CameraFeed> feed) {
-    fd_set fds;
-    struct timeval tv;
-    int r;
-    while(this->streaming){
-        // check if new image available
-        do {
-            FD_ZERO(&fds);
-            FD_SET(this->fd, &fds);
+	fd_set fds;
+	struct timeval tv;
+	int r;
+	while (this->streaming) {
+		// check if new image available
+		do {
+			FD_ZERO(&fds);
+			FD_SET(this->fd, &fds);
 
-            /* Timeout. */
-            tv.tv_sec = 2;
-            tv.tv_usec = 0;
+			/* Timeout. */
+			tv.tv_sec = 2;
+			tv.tv_usec = 0;
 
-            r = select(fd + 1, &fds, NULL, NULL, &tv);
-        } while(-1 == r && (EINTR == errno || EAGAIN == errno));
-        if (r <= 0) {
-            return;
-        }
+			r = select(fd + 1, &fds, NULL, NULL, &tv);
+		} while (r == -1 && (errno == EINTR || errno == EAGAIN));
+		if (r <= 0) {
+			return;
+		}
 
-        // grab image depending on the type of image grabbing
-        // currently only tested for TYPE_IO_MMAP
-        switch (type) {
-        case TYPE_IO_READ:
-            {
-                if (-1 == funcs->read(fd, buffers[0].start, buffers[0].length)) {
-                    switch (errno) {
-                    case EAGAIN:
-                        continue;
-                    case EIO: // could be ignored somehow?
-                    default:
-                        return;
-                    }
-                }
+		// grab image depending on the type of image grabbing
+		// currently only tested for TYPE_IO_MMAP
+		switch (type) {
+			case TYPE_IO_READ: {
+				if (funcs->read(fd, buffers[0].start, buffers[0].length) == -1) {
+					switch (errno) {
+						case EAGAIN:
+							continue;
+						case EIO: // could be ignored somehow?
+						default:
+							return;
+					}
+				}
 
-                get_image(feed, (uint8_t*) (buffers[0].start));
-                break;
-            }
-        case TYPE_IO_MMAP:
-            {
-                CLEAR(buf);
+				get_image(feed, (uint8_t *)(buffers[0].start));
+				break;
+			}
+			case TYPE_IO_MMAP: {
+				CLEAR(buf);
 
-                buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-                buf.memory = V4L2_MEMORY_MMAP;
+				buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+				buf.memory = V4L2_MEMORY_MMAP;
 
-                if (-1 == xioctl(fd, VIDIOC_DQBUF, &buf)) {
-                    switch (errno) {
-                    case EAGAIN:
-                        continue;
-                    case EIO: // could be ignored
-                    default:
-                        return;
-                    }
-                }
+				if (xioctl(fd, VIDIOC_DQBUF, &buf) == -1) {
+					switch (errno) {
+						case EAGAIN:
+							continue;
+						case EIO: // could be ignored
+						default:
+							return;
+					}
+				}
 
-                get_image(feed, (uint8_t *) (buffers[buf.index].start));
+				get_image(feed, (uint8_t *)(buffers[buf.index].start));
 
-                if (-1 == xioctl(fd, VIDIOC_QBUF, &buf))
-                    return;
-                break;
-            }
-        case TYPE_IO_USRPTR:
-            {
-                CLEAR(buf);
+				if (xioctl(fd, VIDIOC_QBUF, &buf) == -1)
+					return;
+				break;
+			}
+			case TYPE_IO_USRPTR: {
+				CLEAR(buf);
 
-                buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-                buf.memory = V4L2_MEMORY_USERPTR;
+				buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+				buf.memory = V4L2_MEMORY_USERPTR;
 
-                if (-1 == xioctl(fd, VIDIOC_DQBUF, &buf)) {
-                    switch (errno) {
-                    case EAGAIN:
-                        continue;
-                    case EIO: // could be ignored
-                    default:
-                        return;
-                    }
-                }
+				if (xioctl(fd, VIDIOC_DQBUF, &buf) == -1) {
+					switch (errno) {
+						case EAGAIN:
+							continue;
+						case EIO: // could be ignored
+						default:
+							return;
+					}
+				}
 
-                for (unsigned int i = 0; i < n_buffers; ++i)
-                    if (buf.m.userptr == (unsigned long)buffers[i].start
-                        && buf.length == buffers[i].length)
-                            break;
+				for (unsigned int i = 0; i < n_buffers; ++i)
+					if (buf.m.userptr == (unsigned long)buffers[i].start && buf.length == buffers[i].length)
+						break;
 
-                get_image(feed, (uint8_t *) (buf.m.userptr));
+				get_image(feed, (uint8_t *)(buf.m.userptr));
 
-                if (-1 == xioctl(fd, VIDIOC_QBUF, &buf))
-                    return;
-                break;
-            }
-        default:
-            break;
-        }
-    }
+				if (xioctl(fd, VIDIOC_QBUF, &buf) == -1)
+					return;
+				break;
+			}
+			default:
+				break;
+		}
+	}
 }
 
-void V4l2_Device::get_image(Ref<CameraFeed> feed, uint8_t* buffer) {
-    Ref<Image> img;
-    img.instance();
+void V4l2_Device::get_image(Ref<CameraFeed> feed, uint8_t *buffer) {
+	Ref<Image> img;
+	img.instance();
 
-    if (-1 == xioctl(fd, VIDIOC_G_FMT, &fmt)){
-        return;
-    }
+	if (xioctl(fd, VIDIOC_G_FMT, &fmt) == -1) {
+		return;
+	}
 
-    // other format implementations should be put here.
-    // Mainly useful if libv4l2 is not installed
-    switch(fmt.fmt.pix.pixelformat){
-    case V4L2_PIX_FMT_RGB24:
-        {
-            if( width != fmt.fmt.pix.width || height != fmt.fmt.pix.height ) {
-                width = fmt.fmt.pix.width;
-                height = fmt.fmt.pix.height;
-                img_data.resize(width * height * 3);
-            }
+	// other format implementations should be put here.
+	// Mainly useful if libv4l2 is not installed
+	switch (fmt.fmt.pix.pixelformat) {
+		case V4L2_PIX_FMT_RGB24: {
+			if (width != fmt.fmt.pix.width || height != fmt.fmt.pix.height) {
+				width = fmt.fmt.pix.width;
+				height = fmt.fmt.pix.height;
+				img_data.resize(width * height * 3);
+			}
 
-            PoolVector<uint8_t>::Write w = img_data.write();
+			PoolVector<uint8_t>::Write w = img_data.write();
             // TODO: Buffer is 1024 Byte longer?
             memcpy(w.ptr(), buffer, width*height*3);
 
-            img->create(width, height, 0, Image::FORMAT_RGB8, img_data);
-            feed->set_RGB_img(img);
-            break;
-        }
-    default:
-        break;
-    }
+			img->create(width, height, 0, Image::FORMAT_RGB8, img_data);
+			feed->set_RGB_img(img);
+			break;
+		}
+		default:
+			break;
+	}
 }
 
 //////////////////////////////////////////////////////////////////////////
